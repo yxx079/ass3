@@ -11,27 +11,16 @@
 #include "ioctl.h"
 #include <linux/slab.h>
 #include <linux/list.h>
-
-MODULE_LICENSE("GPL");
-
-/*
- * This function is called whenever a process tries to do an ioctl on our
- * device file. We get two extra parameters (additional to the inode and file
- * structures, which all device functions get): the number of the ioctl called
- * and the parameter given to the ioctl function.
- *
- * If the ioctl is write or read/write (meaning output is returned to the
- * calling process), the ioctl call returns the output of this function.
- *
- */
-
-
-DEFINE_MUTEX  (devLock);
+DEFINE_MUTEX  (msg_lock);
 static int counter = 0;
 LIST_HEAD(messages);
+MODULE_LICENSE("GPL");
+
+
+
 
 static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
-		 unsigned int ioctl_num,	/* number and param for ioctl */
+		 unsigned int ioctl_num,	
 		 unsigned long ioctl_param)
 {
 
@@ -40,7 +29,7 @@ static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
 	 */
 	if (ioctl_num == RESET_COUNTER) {
 	    counter = 0;
-	    /* 	    return 0; */
+	
 	    return 5; /* can pass integer as return value */
 	}
 
@@ -51,10 +40,6 @@ static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
 	}
 }
 
-
-/*
- * This function is called when the module is loaded
- */
 int init_module(void)
 {
         Major = register_chrdev(0, DEVICE_NAME, &fops);
@@ -74,9 +59,7 @@ int init_module(void)
 	return SUCCESS;
 }
 
-/*
- * This function is called when the module is unloaded
- */
+
 void cleanup_module(void)
 {
     message_t * msg;
@@ -90,74 +73,57 @@ void cleanup_module(void)
 	unregister_chrdev(Major, DEVICE_NAME);
 }
 
-/*
- * Methods
- */
 
-/*
- * Called when a process tries to open the device file, like
- * "cat /dev/mycharfile"
- */
 static int device_open(struct inode *inode, struct file *file)
 {
 
-    mutex_lock (&devLock);
+    mutex_lock (&msg_lock);
     if (Device_Open) {
-	mutex_unlock (&devLock);
+	mutex_unlock (&msg_lock);
 	return -EBUSY;
     }
     Device_Open++;
-    mutex_unlock (&devLock);
+    mutex_unlock (&msg_lock);
     sprintf(msg, "I already told you %d times Hello world!\n", counter++);
     try_module_get(THIS_MODULE);
 
     return SUCCESS;
 }
 
-/* Called when a process closes the device file. */
 static int device_release(struct inode *inode, struct file *file)
 {
-    mutex_lock (&devLock);
+    mutex_lock (&msg_lock);
 	Device_Open--;		/* We're now ready for our next caller */
-	mutex_unlock (&devLock);
-	/*
-	 * Decrement the usage count, or else once you opened the file, you'll
-	 * never get get rid of the module.
-	 */
+	mutex_unlock (&msg_lock);
+	
 	module_put(THIS_MODULE);
 
 	return 0;
 }
 
-/*
- * Called when a process, which already opened the dev file, attempts to
- * read from it.
- */
-static ssize_t device_read(struct file *filp,	/* see include/linux/fs.h   */
-			   char *buffer,	/* buffer to fill with data */
-			   size_t length,	/* length of the buffer     */
-			   loff_t * offset)
+static ssize_t 
+device_read(struct file *filp,char *buffer,	size_t length,loff_t * offset)
 {
-	message_t* msg;
+	message_t* mess;
 	size_t len;
 	int result;
-	mutex_lock(&devLock);
+	mutex_lock(&msg_lock);
     if(list_empty(&messages)){
-        mutex_unlock(&devLock);
+        mutex_unlock(&msg_lock);
         return -EAGAIN;
     }
-    msg=list_first_entry(&messages,message_t,list);
-    len=msg->length+1;
-    result=copy_to_user(buffer,msg->data,len);
+    mess=list_first_entry(&messages,message_t,list);
+    len=mess->length+1;
+    result=copy_to_user(buffer,mess->data,len);
     if(result>0){
-        mutex_unlock(&devLock);
+        mutex_unlock(&msg_lock);
         return -EFAULT;
     }
-    message_number=message_number-1;
-    list_del(&msg->list);
-    kfree(msg->data);
-    kfree(msg);
-    mutex_unlock(&devLock);
+    msg_num=msg_num-1;
+    list_del(&mess->list);
+    kfree(mess->data);
+    kfree(mess);
+    mutex_unlock(&msg_lock);
 	return len;
 }
 
@@ -165,33 +131,33 @@ static ssize_t device_read(struct file *filp,	/* see include/linux/fs.h   */
 static ssize_t
 device_write(struct file *filp, const char *buff, size_t len, loff_t * off)
 {
-	message_t* msg;
+	message_t* mess;
 	int result;
-	mutex_lock(&devLock);
+	mutex_lock(&msg_lock);
 
 	if(len-1>MESSAGE_LENGTH){
-        mutex_unlock(&devLock);
+        mutex_unlock(&msg_lock);
         return -EINVAL;
 	}
-	if(message_number==MESSAGE_SIZE){
-        mutex_unlock(&devLock);
+	if(msg_num==MESSAGE_SIZE){
+        mutex_unlock(&msg_lock);
         return -EAGAIN;
 	}
-	msg=kmalloc(sizeof(message_t),GFP_KERNEL);
-	msg->data=kmalloc(len,GFP_KERNEL);
-	result=copy_from_user(msg->data,buff,len);
+	mess=kmalloc(sizeof(message_t),GFP_KERNEL);
+	mess->data=kmalloc(len,GFP_KERNEL);
+	result=copy_from_user(mess->data,buff,len);
 	if(result>0){
-        kfree(msg->data);
-        kfree(msg);
-        mutex_unlock(&devLock);
+        kfree(mess->data);
+        kfree(mess);
+        mutex_unlock(&msg_lock);
         return -EFAULT;
     }
-	INIT_LIST_HEAD(&msg->list);
+	INIT_LIST_HEAD(&mess->list);
 
-	list_add(&msg->list,&messages);
-	msg->length=len-1;
-	message_number=message_number+1;
-	mutex_unlock(&devLock);
+	list_add(&mess->list,&messages);
+	mess->length=len-1;
+	msg_num=msg_num+1;
+	mutex_unlock(&msg_lock);
 
 	return len;
 }
