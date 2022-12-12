@@ -6,37 +6,26 @@
 #include <linux/kernel.h>
 #include <linux/module.h>
 #include <linux/fs.h>
-#include <asm/uaccess.h>	/* for put_user */
+#include <asm/uaccess.h>	
 #include <charDeviceDriver.h>
-#include "ioctl.h"
 #include <linux/slab.h>
-#include <linux/list.h>
-DEFINE_MUTEX  (msg_lock);
-static int counter = 0;
-LIST_HEAD(messages);
 MODULE_LICENSE("GPL");
 
 
+DEFINE_MUTEX  (msg_lock);
+#define msgLen 4096
+#define msgSize 1000
+#define RESET_COUNTER 0 
+static int counter = 0;
 
-
-static long device_ioctl(struct file *file,	/* see include/linux/fs.h */
-		 unsigned int ioctl_num,	
-		 unsigned long ioctl_param)
+static long device_ioctl(struct file *file,	 unsigned int ioctl_num,unsigned long ioctl_param)
 {
-
-	/*
-	 * Switch according to the ioctl called
-	 */
 	if (ioctl_num == RESET_COUNTER) {
 	    counter = 0;
-	
-	    return 5; /* can pass integer as return value */
+	    return 5; 
 	}
-
 	else {
-	    /* no operation defined - return failure */
 	    return -EINVAL;
-
 	}
 }
 
@@ -62,17 +51,28 @@ int init_module(void)
 
 void cleanup_module(void)
 {
-    message_t * msg;
-    while(!list_empty(&messages)){
-        msg=list_first_entry_or_null(&messages,message_t,list);
-        list_del(&msg->list);
-        kfree(msg->data);
-        kfree(msg);
-    }
-	/*  Unregister the device */
+	message_t* temp;
+	message_t* to_f;
+	temp=messages;
+
+	while(temp!=NULL){
+        to_f=temp;
+        temp=temp->next;
+        kfree(to_f->msg);
+        kfree(to_f);
+	}
 	unregister_chrdev(Major, DEVICE_NAME);
 }
+static int device_release(struct inode *inode, struct file *file)
+{
+    mutex_lock (&msg_lock);
+	Device_Open--;		
+	mutex_unlock (&msg_lock);
+	
+	module_put(THIS_MODULE);
 
+	return 0;
+}
 
 static int device_open(struct inode *inode, struct file *file)
 {
@@ -84,80 +84,83 @@ static int device_open(struct inode *inode, struct file *file)
     }
     Device_Open++;
     mutex_unlock (&msg_lock);
-    sprintf(msg, "I already told you %d times Hello world!\n", counter++);
+    counter++;
     try_module_get(THIS_MODULE);
 
     return SUCCESS;
 }
 
-static int device_release(struct inode *inode, struct file *file)
-{
-    mutex_lock (&msg_lock);
-	Device_Open--;		/* We're now ready for our next caller */
-	mutex_unlock (&msg_lock);
-	
-	module_put(THIS_MODULE);
 
-	return 0;
-}
 
-static ssize_t 
-device_read(struct file *filp,char *buffer,	size_t length,loff_t * offset)
-{
-	message_t* mess;
-	size_t len;
-	int result;
-	mutex_lock(&msg_lock);
-    if(list_empty(&messages)){
-        mutex_unlock(&msg_lock);
-        return -EAGAIN;
-    }
-    mess=list_first_entry(&messages,message_t,list);
-    len=mess->length+1;
-    result=copy_to_user(buffer,mess->data,len);
-    if(result>0){
-        mutex_unlock(&msg_lock);
-        return -EFAULT;
-    }
-    msg_num=msg_num-1;
-    list_del(&mess->list);
-    kfree(mess->data);
-    kfree(mess);
-    mutex_unlock(&msg_lock);
-	return len;
-}
-
-/* Called when a process writes to dev file: echo "hi" > /dev/hello  */
 static ssize_t
-device_write(struct file *filp, const char *buff, size_t len, loff_t * off)
-{
-	message_t* mess;
-	int result;
+device_write(struct file *filp, 
+             const char *buff, 
+             size_t len,
+              loff_t * off)
+{   int out;
+	message_t* message;
+	message_t* temp;
+	
 	mutex_lock(&msg_lock);
-
-	if(len-1>MESSAGE_LENGTH){
+	if(len-1>msgLen){
         mutex_unlock(&msg_lock);
         return -EINVAL;
 	}
-	if(msg_num==MESSAGE_SIZE){
+	if(messages_size>msgSize){
         mutex_unlock(&msg_lock);
         return -EAGAIN;
 	}
-	mess=kmalloc(sizeof(message_t),GFP_KERNEL);
-	mess->data=kmalloc(len,GFP_KERNEL);
-	result=copy_from_user(mess->data,buff,len);
-	if(result>0){
-        kfree(mess->data);
-        kfree(mess);
+	message=kmalloc(sizeof(message_t),GFP_KERNEL);
+	message->msg=kmalloc(len,GFP_KERNEL);
+	message->next=NULL;
+	message->length=len-1;
+	out=copy_from_user(message->msg,buff,len);
+	if(out>0){
+        kfree(message->msg);
+        kfree(message);
         mutex_unlock(&msg_lock);
         return -EFAULT;
-    }
-	INIT_LIST_HEAD(&mess->list);
-
-	list_add(&mess->list,&messages);
-	mess->length=len-1;
-	msg_num=msg_num+1;
+	}
+	if(messages==NULL){
+        messages=message;
+	}
+	else{
+        temp=messages;
+        while(temp->next!=NULL){
+            temp=temp->next;
+        }
+        temp->next=message;
+	}
+	messages_size+=1;
 	mutex_unlock(&msg_lock);
+	return len;
+}
 
+
+static ssize_t device_read(struct file *filp,	
+			   char *buffer,	
+			   size_t length,	
+			   loff_t * offset)
+{
+	int out;
+	size_t len;
+	message_t* message;
+	mutex_lock(&msg_lock);
+	if(messages==NULL){
+        mutex_unlock(&msg_lock);
+        return -EAGAIN;
+	}
+	message=messages;
+	messages=messages->next;
+	len=message->length+1;
+    out=copy_to_user(buffer,message->msg,len);
+	if(out>0){
+        mutex_unlock(&msg_lock);
+        return -EFAULT;
+	}
+	messages_size-=1;
+	kfree(message->msg);
+	kfree(message);
+	mutex_unlock(&msg_lock);
 	return len;
 }
