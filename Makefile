@@ -7,6 +7,7 @@ MODULES = charDeviceDriver.ko
 obj-m += charDeviceDriver.o 
 
 
+
 all: $(MODULES)
 
 charDeviceDriver.ko: charDeviceDriver.c
@@ -15,4 +16,8 @@ charDeviceDriver.ko: charDeviceDriver.c
 clean:
 	make -C $(KERNELDIR) M=$(PWD) clean
 	rm -f *.o *.o.rc
+install:	
+	make -C $(KERNELDIR) M=$(PWD) modules_install
 
+quickInstall:
+	cp $(MODULES) /lib/modules/`uname -r`/extra
